@@ -1,3 +1,11 @@
+## Installing the Garry's Mod Addon First
+
+Subscribe to the runtime importor addon on the Steam Workshop:
+
+**[PMX Static Importer Runtime](https://steamcommunity.com/workshop/filedetails/?id=3467707027)**
+
+The addon appears in-game under **Construction → Model Importer → Static Model Importer** in the toolgun menu.
+
 # PMX Static Importer
 
 A desktop tool for importing 3D models (PMX, FBX, OBJ, GLB) into Garry's Mod as runtime-rendered static props, paired with a Garry's Mod Lua addon that loads and displays them in-game.
@@ -93,14 +101,6 @@ build_windows_console_debug.bat
 | `--onefile` | Produce a single-file executable instead of a directory |
 | `--console` | Keep the console window visible (useful for debugging) |
 | `--keep-build` | Skip cleaning `build/` and `dist/` before building |
-
-## Installing the Garry's Mod Addon
-
-Subscribe to the runtime addon on the Steam Workshop:
-
-**[PMX Static Importer Runtime](https://steamcommunity.com/workshop/filedetails/?id=3467707027)**
-
-The addon appears in-game under **Construction → Model Importer → Static Model Importer** in the toolgun menu.
 
 ## Running from Source (without building)
 
