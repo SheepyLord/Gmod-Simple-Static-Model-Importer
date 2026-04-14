@@ -290,7 +290,23 @@ local function build_chunk_mesh(material, verts)
     return meshObject
 end
 
-local function read_mesh_file(meshPath, manifest)
+local function vertex_passes_clip(px, py, pz, clip)
+    if not clip then return true end
+    if clip.xmin_on and px < clip.xmin then return false end
+    if clip.xmax_on and px > clip.xmax then return false end
+    if clip.ymin_on and py < clip.ymin then return false end
+    if clip.ymax_on and py > clip.ymax then return false end
+    if clip.zmin_on and pz < clip.zmin then return false end
+    if clip.zmax_on and pz > clip.zmax then return false end
+    return true
+end
+
+local function has_active_clip(clip)
+    if not clip then return false end
+    return clip.xmin_on or clip.xmax_on or clip.ymin_on or clip.ymax_on or clip.zmin_on or clip.zmax_on
+end
+
+local function read_mesh_file(meshPath, manifest, clip)
     -- Try DATA first (user imports), then GAME data_static (workshop addons)
     local f = file.Open(meshPath, "rb", "DATA")
     if not f then
@@ -300,6 +316,8 @@ local function read_mesh_file(meshPath, manifest)
     if not f then
         return nil, PMXStaticImporter.TF("error_could_not_open_mesh_file", nil, tostring(meshPath))
     end
+
+    local activeClip = has_active_clip(clip) and clip or nil
 
     local ok, resultOrErr = xpcall(function()
         local magic = f:Read(8)
@@ -350,26 +368,41 @@ local function read_mesh_file(meshPath, manifest)
                 chunkVerts = {}
             end
 
-            for vertexIndex = 1, vertexCount do
-                local px = f:ReadFloat()
-                local py = f:ReadFloat()
-                local pz = f:ReadFloat()
-                local nx = f:ReadFloat()
-                local ny = f:ReadFloat()
-                local nz = f:ReadFloat()
-                local u = f:ReadFloat()
-                local v = f:ReadFloat()
+            -- Vertices in the binary file are stored as sequential triangles (groups of 3)
+            local triCount = math.floor(vertexCount / 3)
+            local leftover = vertexCount - triCount * 3
 
-                chunkVerts[#chunkVerts + 1] = {
-                    pos = Vector(px, py, pz),
-                    normal = Vector(nx, ny, nz),
-                    u = u,
-                    v = v,
-                }
-
-                if #chunkVerts >= PMXStaticImporter.MaxVertsPerMesh then
-                    flush_chunk()
+            for _ = 1, triCount do
+                local tri = {}
+                local pass = true
+                for v = 1, 3 do
+                    local px = f:ReadFloat()
+                    local py = f:ReadFloat()
+                    local pz = f:ReadFloat()
+                    local nx = f:ReadFloat()
+                    local ny = f:ReadFloat()
+                    local nz = f:ReadFloat()
+                    local u = f:ReadFloat()
+                    local vt = f:ReadFloat()
+                    tri[v] = { pos = Vector(px, py, pz), normal = Vector(nx, ny, nz), u = u, v = vt }
+                    if activeClip and not vertex_passes_clip(px, py, pz, activeClip) then
+                        pass = false
+                    end
                 end
+
+                if pass then
+                    for v = 1, 3 do
+                        chunkVerts[#chunkVerts + 1] = tri[v]
+                    end
+                    if #chunkVerts >= PMXStaticImporter.MaxVertsPerMesh then
+                        flush_chunk()
+                    end
+                end
+            end
+
+            -- Skip any leftover vertices that don't form a complete triangle
+            if leftover > 0 then
+                f:Seek(f:Tell() + leftover * 32)
             end
 
             flush_chunk()
@@ -394,13 +427,25 @@ function PMXStaticImporter.GetRenderable(modelID)
         return nil, err
     end
 
-    local cacheKey = make_cache_key(manifest.model_id or modelID, manifest.build_id or "")
+    local clip = PMXStaticImporter.LoadClipBounds and PMXStaticImporter.LoadClipBounds(manifest.model_id or modelID) or {}
+    local clipSuffix = ""
+    if has_active_clip(clip) then
+        clipSuffix = string.format("|clip:%s:%s:%s:%s:%s:%s",
+            tostring(clip.xmin_on and clip.xmin or ""),
+            tostring(clip.xmax_on and clip.xmax or ""),
+            tostring(clip.ymin_on and clip.ymin or ""),
+            tostring(clip.ymax_on and clip.ymax or ""),
+            tostring(clip.zmin_on and clip.zmin or ""),
+            tostring(clip.zmax_on and clip.zmax or ""))
+    end
+
+    local cacheKey = make_cache_key(manifest.model_id or modelID, manifest.build_id or "") .. clipSuffix
     local cached = PMXStaticImporter.RenderableCache[cacheKey]
     if cached then
         return cached
     end
 
-    local drawItems, meshErr = read_mesh_file(manifest.mesh_file, manifest)
+    local drawItems, meshErr = read_mesh_file(manifest.mesh_file, manifest, clip)
     if not drawItems then
         return nil, meshErr
     end
@@ -415,6 +460,20 @@ function PMXStaticImporter.GetRenderable(modelID)
 
     PMXStaticImporter.RenderableCache[cacheKey] = renderable
     return renderable
+end
+
+-- Build a renderable with explicit clip bounds (not cached, used by mesh editor preview)
+function PMXStaticImporter.ReadMeshFileClipped(manifest, clip)
+    local drawItems, meshErr = read_mesh_file(manifest.mesh_file, manifest, clip)
+    if not drawItems then return nil end
+
+    local mins, maxs = PMXStaticImporter.GetBoundsFromManifest(manifest)
+    return {
+        manifest = manifest,
+        drawItems = drawItems,
+        mins = mins,
+        maxs = maxs,
+    }
 end
 
 local function draw_renderable_pass(ent, renderable, wantTranslucent)
@@ -534,3 +593,38 @@ end
 
 -- Entity rendering is handled by ENT:Draw() and ENT:DrawTranslucent()
 -- in cl_init.lua so the shadow system can see the geometry.
+
+function PMXStaticImporter.DrawRenderableGhost(renderable, pos, ang, scale, alpha)
+    if not renderable then return end
+    scale = math.max(tonumber(scale) or 1, 0.0001)
+    alpha = tonumber(alpha) or 0.4
+
+    local lightingOrigin = pos + (renderable.mins + renderable.maxs) * (0.5 * scale)
+    render.SetLocalModelLights()
+    render.ResetModelLighting(0, 0, 0)
+    for _, sample in ipairs(renderableLightSamples) do
+        local lightColor = render.ComputeLighting(lightingOrigin, sample.normal)
+        render.SetModelLighting(sample.box, lightColor.x, lightColor.y, lightColor.z)
+    end
+
+    local matrix = Matrix()
+    matrix:Translate(pos)
+    matrix:Rotate(ang)
+    matrix:Scale(Vector(scale, scale, scale))
+
+    cam.PushModelMatrix(matrix)
+        for _, item in ipairs(renderable.drawItems or {}) do
+            render.SetMaterial(item.material or PMXStaticImporter.DebugWhite)
+            render.SetColorModulation(item.diffuseR or 1, item.diffuseG or 1, item.diffuseB or 1)
+            render.SetBlend(alpha)
+            render.CullMode(item.noCull and MATERIAL_CULLMODE_NONE or MATERIAL_CULLMODE_CCW)
+            if item.mesh then
+                item.mesh:Draw()
+            end
+        end
+    cam.PopModelMatrix()
+
+    render.CullMode(MATERIAL_CULLMODE_CCW)
+    render.SetBlend(1)
+    render.SetColorModulation(1, 1, 1)
+end

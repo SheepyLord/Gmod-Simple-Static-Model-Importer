@@ -172,8 +172,207 @@ def _convert_fbx_to_glb_with_blender(source_path: Path, glb_path: Path, blender_
 
 
 def _load_obj_model(source_path: Path, log: LogFn = None) -> PMXModel:
+    """Load OBJ with direct face-vertex UV parsing for reliable per-material UVs.
+
+    Trimesh may share or misassign UV arrays across sub-geometries when
+    splitting an OBJ by material, causing the wrong material's UVs to appear
+    in the texture-assignment picker.  Parsing the OBJ directly avoids this.
+    """
     obj_overrides = _parse_obj_material_overrides(source_path)
-    return _load_trimesh_scene_model(source_path, source_format='obj', log=log, obj_material_overrides=obj_overrides)
+
+    # ── Parse OBJ geometry ──────────────────────────────────────────
+    positions: list[tuple[float, float, float]] = []
+    tex_coords: list[tuple[float, float]] = []
+    obj_normals: list[tuple[float, float, float]] = []
+
+    current_material = ''
+    material_faces: dict[str, list[list[tuple[int, int, int]]]] = {}
+    material_order: list[str] = []
+
+    try:
+        raw_text = source_path.read_text(encoding='utf-8', errors='ignore')
+    except Exception as exc:
+        raise SceneLoadError(f'Failed to read {source_path.name}: {exc}') from exc
+
+    for raw_line in raw_text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith('#'):
+            continue
+        parts = line.split()
+        key = parts[0].lower()
+
+        if key == 'v' and len(parts) >= 4:
+            try:
+                positions.append((float(parts[1]), float(parts[2]), float(parts[3])))
+            except ValueError:
+                pass
+        elif key == 'vt':
+            try:
+                u = float(parts[1]) if len(parts) > 1 else 0.0
+                v = float(parts[2]) if len(parts) > 2 else 0.0
+                tex_coords.append((u, v))
+            except ValueError:
+                tex_coords.append((0.0, 0.0))
+        elif key == 'vn' and len(parts) >= 4:
+            try:
+                obj_normals.append((float(parts[1]), float(parts[2]), float(parts[3])))
+            except ValueError:
+                pass
+        elif key == 'usemtl':
+            name = line[len(parts[0]):].strip()
+            current_material = name
+            if name and name not in material_faces:
+                material_faces[name] = []
+                material_order.append(name)
+        elif key == 'f' and len(parts) >= 4:
+            face_verts: list[tuple[int, int, int]] = []
+            valid = True
+            for fv in parts[1:]:
+                components = fv.split('/')
+                try:
+                    v_idx = int(components[0]) if components[0] else 0
+                except ValueError:
+                    valid = False
+                    break
+                try:
+                    vt_idx = int(components[1]) if len(components) > 1 and components[1] else 0
+                except ValueError:
+                    vt_idx = 0
+                try:
+                    vn_idx = int(components[2]) if len(components) > 2 and components[2] else 0
+                except ValueError:
+                    vn_idx = 0
+                # Resolve negative (relative) indices
+                if v_idx < 0:
+                    v_idx = len(positions) + v_idx + 1
+                if vt_idx < 0:
+                    vt_idx = len(tex_coords) + vt_idx + 1
+                if vn_idx < 0:
+                    vn_idx = len(obj_normals) + vn_idx + 1
+                face_verts.append((v_idx, vt_idx, vn_idx))
+            if not valid or len(face_verts) < 3:
+                continue
+            if not current_material:
+                current_material = '__default__'
+                if current_material not in material_faces:
+                    material_faces[current_material] = []
+                    material_order.append(current_material)
+            material_faces.setdefault(current_material, []).append(face_verts)
+
+    if log:
+        log(
+            f'Parsed OBJ: {len(positions):,} positions, '
+            f'{len(tex_coords):,} UVs, {len(obj_normals):,} normals, '
+            f'{len(material_order)} material group(s).'
+        )
+
+    # ── Build PMXModel ──────────────────────────────────────────────
+    all_vertices: list[PMXVertex] = []
+    all_indices: list[int] = []
+    all_materials: list[PMXMaterial] = []
+    textures: list[str] = []
+    embedded_textures: dict[str, bytes] = {}
+    texture_index_by_key: dict[str, int] = {}
+    available_images = _collect_workspace_images(source_path)
+    used_images: set[Path] = set()
+
+    for material_name in material_order:
+        faces = material_faces.get(material_name)
+        if not faces:
+            continue
+
+        surface_indices: list[int] = []
+
+        for face in faces:
+            if len(face) < 3:
+                continue
+            # Fan triangulation for quads / n-gons
+            for tri_idx in range(1, len(face) - 1):
+                for vert_ref in (face[0], face[tri_idx], face[tri_idx + 1]):
+                    v_idx, vt_idx, vn_idx = vert_ref
+                    pos = positions[v_idx - 1] if 1 <= v_idx <= len(positions) else (0.0, 0.0, 0.0)
+                    uv = tex_coords[vt_idx - 1] if 1 <= vt_idx <= len(tex_coords) else (0.0, 0.0)
+                    normal = obj_normals[vn_idx - 1] if 1 <= vn_idx <= len(obj_normals) else (0.0, 0.0, 1.0)
+
+                    vertex_index = len(all_vertices)
+                    all_vertices.append(PMXVertex(position=pos, normal=normal, uv=uv))
+                    surface_indices.append(vertex_index)
+
+        if not surface_indices:
+            continue
+
+        # Resolve texture via MTL overrides (already fully resolved)
+        override = obj_overrides.get(material_name)
+        texture_ref: str | None = None
+
+        if override is not None:
+            if override.resolved_texture is not None:
+                try:
+                    texture_ref = override.resolved_texture.resolve().relative_to(
+                        source_path.parent.resolve()
+                    ).as_posix()
+                except ValueError:
+                    texture_ref = str(override.resolved_texture)
+            elif override.texture_ref:
+                texture_ref = override.texture_ref
+
+        # Fallback: match material name to available image files
+        if texture_ref is None and available_images:
+            matched = _match_material_name_to_image(material_name, available_images, used_images)
+            if matched is not None:
+                texture_ref = str(matched)
+                used_images.add(matched)
+
+        texture_index = _register_texture(
+            texture_ref=texture_ref,
+            embedded_image_bytes=None,
+            textures=textures,
+            embedded_textures=embedded_textures,
+            texture_index_by_key=texture_index_by_key,
+        )
+
+        diffuse: tuple[float, float, float, float] = (0.8, 0.8, 0.8, 1.0)
+        if override is not None:
+            diffuse = override.diffuse
+
+        all_indices.extend(surface_indices)
+        all_materials.append(PMXMaterial(
+            name_local=material_name,
+            name_en=material_name,
+            diffuse=diffuse,
+            draw_flags=0,
+            texture_index=texture_index,
+            surface_count=len(surface_indices),
+        ))
+
+    if not all_vertices or not all_indices or not all_materials:
+        raise SceneLoadError(f'No renderable mesh data was found in {source_path.name}.')
+
+    if log:
+        log(
+            f'Built OBJ model: {len(all_vertices):,} vertices, '
+            f'{len(all_indices) // 3:,} triangles, {len(all_materials)} material(s).'
+        )
+
+    model_name = source_path.stem
+    return PMXModel(
+        version=2.0,
+        text_encoding=1,
+        additional_uv_count=0,
+        name_local=model_name,
+        name_en=model_name,
+        comment_local='',
+        comment_en='',
+        vertices=all_vertices,
+        indices=all_indices,
+        textures=textures,
+        materials=all_materials,
+        bone_count=0,
+        morph_count=0,
+        source_path=source_path,
+        source_format='obj',
+        embedded_textures=embedded_textures,
+    )
 
 
 
@@ -183,6 +382,7 @@ def _load_trimesh_scene_model(
     source_format: str,
     log: LogFn = None,
     obj_material_overrides: dict[str, _ObjMaterialOverride] | None = None,
+    obj_usemtl_order: list[str] | None = None,
 ) -> PMXModel:
     try:
         scene = trimesh.load(source_path, force='scene', process=False)
@@ -208,6 +408,12 @@ def _load_trimesh_scene_model(
     if log:
         log(f"Loaded {source_path.suffix.lower()} scene with {len(scene.geometry)} geometry object(s).")
 
+    available_images = _collect_workspace_images(source_path)
+
+    # Build a set for fast name-based usemtl matching
+    _usemtl_remaining: set[str] = set(obj_usemtl_order) if obj_usemtl_order else set()
+
+    geometry_index = 0
     for node_name in node_names:
         try:
             transform, geometry_name = scene.graph[node_name]
@@ -223,12 +429,30 @@ def _load_trimesh_scene_model(
         if len(geom.vertices) == 0 or len(geom.faces) == 0:
             continue
 
+        # Match geometry to usemtl name: prefer name-based match over positional
+        usemtl_name = None
+        if obj_usemtl_order:
+            trimesh_mat = getattr(getattr(geom, 'visual', None), 'material', None)
+            trimesh_mat_name = getattr(trimesh_mat, 'name', None) if trimesh_mat is not None else None
+            for candidate in (str(geometry_name), str(node_name), trimesh_mat_name):
+                if candidate and candidate in _usemtl_remaining:
+                    usemtl_name = candidate
+                    _usemtl_remaining.discard(candidate)
+                    break
+            if usemtl_name is None and geometry_index < len(obj_usemtl_order):
+                fallback = obj_usemtl_order[geometry_index]
+                if fallback in _usemtl_remaining:
+                    usemtl_name = fallback
+                    _usemtl_remaining.discard(fallback)
+
         context = _build_material_context(
             geom=geom,
             geometry_name=str(geometry_name),
             node_name=str(node_name),
             source_path=source_path,
             obj_material_overrides=obj_material_overrides,
+            available_images=available_images,
+            usemtl_name=usemtl_name,
         )
         texture_index = _register_texture(
             texture_ref=context.texture_ref,
@@ -270,6 +494,7 @@ def _load_trimesh_scene_model(
                 surface_count=len(surface_indices),
             )
         )
+        geometry_index += 1
 
     if not vertices or not indices or not materials:
         raise SceneLoadError(f'No renderable mesh data was found in {source_path.name}.')
@@ -303,23 +528,34 @@ def _build_material_context(
     node_name: str,
     source_path: Path,
     obj_material_overrides: dict[str, _ObjMaterialOverride] | None,
+    available_images: list[Path] | None = None,
+    usemtl_name: str | None = None,
 ) -> _MaterialContext:
     visual = getattr(geom, 'visual', None)
     material = getattr(visual, 'material', None)
 
     material_name = _first_nonempty(
+        usemtl_name,
         getattr(material, 'name', None),
         geometry_name,
         node_name,
         source_path.stem,
     )
 
-    override = obj_material_overrides.get(material_name) if obj_material_overrides else None
+    # Look up OBJ override by usemtl_name, material_name, geometry_name, node_name
+    override = None
+    if obj_material_overrides:
+        for candidate_key in (usemtl_name, material_name, geometry_name, node_name):
+            if candidate_key:
+                override = obj_material_overrides.get(candidate_key)
+                if override is not None:
+                    break
+
     texture_ref = None
     embedded_image_bytes = None
 
     image = _extract_material_image(material)
-    if image is not None:
+    if image is not None and not _is_likely_default_image(image):
         embedded_image_bytes = _encode_image_as_png_bytes(image)
     elif override is not None and override.resolved_texture is not None:
         try:
@@ -328,6 +564,15 @@ def _build_material_context(
             texture_ref = str(override.resolved_texture)
     elif override is not None and override.texture_ref:
         texture_ref = override.texture_ref
+
+    # If still no texture, try matching usemtl/material/geometry/node names to image files
+    if embedded_image_bytes is None and texture_ref is None and available_images:
+        for candidate_name in (usemtl_name, material_name, geometry_name, node_name):
+            if candidate_name:
+                matched = _match_material_name_to_image(candidate_name, available_images)
+                if matched is not None:
+                    texture_ref = str(matched)
+                    break
 
     diffuse = _extract_material_diffuse(material)
     if override is not None and diffuse == (0.8, 0.8, 0.8, 1.0):
@@ -476,6 +721,125 @@ def _apply_normal_transform(normals: np.ndarray, transform_matrix: np.ndarray) -
 
 
 
+def _collect_workspace_images(source_path: Path) -> list[Path]:
+    """Collect image files from the model directory and nearby directories."""
+    search_roots: list[Path] = []
+    current = source_path.parent.resolve()
+    for _ in range(3):
+        if current.exists() and current not in search_roots:
+            search_roots.append(current)
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    seen: set[Path] = set()
+    results: list[Path] = []
+    for root in search_roots:
+        for path in root.rglob('*'):
+            if path.is_file() and path.suffix.lower() in _IMAGE_SUFFIXES:
+                resolved = path.resolve()
+                if resolved not in seen:
+                    seen.add(resolved)
+                    results.append(path)
+    results.sort(key=lambda p: p.as_posix().lower())
+    return results
+
+
+
+def _is_likely_default_image(image: 'Image.Image') -> bool:
+    """Return True if the image is likely a trimesh auto-generated default."""
+    w, h = image.size
+    if w <= 4 and h <= 4:
+        return True
+    if w <= 64 and h <= 64:
+        rgb = image.convert('RGB')
+        extrema = rgb.getextrema()
+        if all(mx - mn < 8 for mn, mx in extrema):
+            return True
+    return False
+
+
+
+def _match_material_name_to_image(
+    material_name: str,
+    available_images: list[Path],
+    used: set[Path] | None = None,
+) -> Path | None:
+    """Match a material name to an available image file."""
+    if not material_name:
+        return None
+    used = used or set()
+
+    # Strip trailing extension-like suffixes from the material name
+    cleaned = material_name
+    for suffix in ('_dds', '_png', '_jpg', '_jpeg', '_bmp', '_tga', '_tif', '_tiff'):
+        if cleaned.lower().endswith(suffix):
+            cleaned = cleaned[:len(cleaned) - len(suffix)]
+            break
+
+    # Exact stem match (case-insensitive)
+    cleaned_lower = cleaned.lower()
+    for img in available_images:
+        if img in used:
+            continue
+        if img.stem.lower() == cleaned_lower:
+            return img
+
+    # Normalized match (alphanumeric only)
+    normalized = _normalize_texture_name(cleaned)
+    if normalized:
+        for img in available_images:
+            if img in used:
+                continue
+            if _normalize_texture_name(img.stem) == normalized:
+                return img
+
+    # Fuzzy match
+    if normalized:
+        remaining = [img for img in available_images if img not in used]
+        best = _match_image_reference_fuzzy(cleaned, remaining)
+        if best is not None:
+            return best
+
+    return None
+
+
+
+def _populate_overrides_from_obj_usemtl(
+    obj_path: Path,
+    overrides: dict[str, _ObjMaterialOverride],
+) -> None:
+    """Create override entries for usemtl material names missing from the .mtl file."""
+    try:
+        for raw_line in obj_path.read_text(encoding='utf-8', errors='ignore').splitlines():
+            line = raw_line.strip()
+            if line.lower().startswith('usemtl '):
+                name = line[7:].strip()
+                if name and name not in overrides:
+                    overrides[name] = _ObjMaterialOverride(name=name)
+    except Exception:
+        pass
+
+
+
+def _extract_obj_usemtl_order(obj_path: Path) -> list[str]:
+    """Return ordered unique usemtl names from an OBJ file."""
+    names: list[str] = []
+    seen: set[str] = set()
+    try:
+        for raw_line in obj_path.read_text(encoding='utf-8', errors='ignore').splitlines():
+            line = raw_line.strip()
+            if line.lower().startswith('usemtl '):
+                name = line[7:].strip()
+                if name and name not in seen:
+                    seen.add(name)
+                    names.append(name)
+    except Exception:
+        pass
+    return names
+
+
+
 def _parse_obj_material_overrides(obj_path: Path) -> dict[str, _ObjMaterialOverride]:
     mtllib_paths = _discover_mtl_files(obj_path)
     overrides: dict[str, _ObjMaterialOverride] = {}
@@ -516,14 +880,25 @@ def _parse_obj_material_overrides(obj_path: Path) -> dict[str, _ObjMaterialOverr
                 except Exception:
                     pass
 
-    available_images = sorted(
-        [path for path in obj_path.parent.rglob('*') if path.is_file() and path.suffix.lower() in _IMAGE_SUFFIXES],
-        key=lambda item: item.as_posix().lower(),
-    )
+    available_images = _collect_workspace_images(obj_path)
+    _populate_overrides_from_obj_usemtl(obj_path, overrides)
     resolved_refs = _resolve_referenced_images(all_raw_refs, available_images)
     for material_name, resolved_path in resolved_refs.items():
         if material_name in overrides:
             overrides[material_name].resolved_texture = resolved_path
+
+    # For materials still without textures, match material name to image files
+    used: set[Path] = set(resolved_refs.values())
+    for material_name, override in overrides.items():
+        if override.resolved_texture is not None:
+            continue
+        if override.texture_ref:
+            continue
+        matched = _match_material_name_to_image(material_name, available_images, used)
+        if matched is not None:
+            override.resolved_texture = matched
+            used.add(matched)
+
     return overrides
 
 

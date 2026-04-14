@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -96,6 +97,54 @@ def _ensure_tk_assets_present(base_prefix: Path) -> tuple[list[tuple[Path, str]]
 
 
 
+def _find_extra_dlls(base_prefix: Path) -> list[tuple[Path, str]]:
+    """Find conda/system DLLs that PyInstaller fails to resolve automatically."""
+    needed = [
+        "libcrypto-3-x64.dll",
+        "libssl-3-x64.dll",
+        "libexpat.dll",
+        "liblzma.dll",
+        "libbz2.dll",
+        "ffi-8.dll",
+    ]
+    search_dirs = [
+        base_prefix / "Library" / "bin",
+        base_prefix / "DLLs",
+        base_prefix,
+    ]
+    binaries: list[tuple[Path, str]] = []
+    seen: set[str] = set()
+    for name in needed:
+        for directory in search_dirs:
+            candidate = directory / name
+            if candidate.exists() and name.lower() not in seen:
+                seen.add(name.lower())
+                binaries.append((candidate, "."))
+                break
+    return binaries
+
+
+
+def _find_7z_tool() -> list[tuple[Path, str]]:
+    """Find 7z.exe (and 7z.dll) from a local 7-Zip installation to bundle."""
+    candidates = []
+    for env_var in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+        pf = os.environ.get(env_var)
+        if pf:
+            candidates.append(Path(pf) / "7-Zip")
+
+    for directory in candidates:
+        exe = directory / "7z.exe"
+        dll = directory / "7z.dll"
+        if exe.is_file():
+            result: list[tuple[Path, str]] = [(exe, ".")]
+            if dll.is_file():
+                result.append((dll, "."))
+            return result
+    return []
+
+
+
 def _build_pyinstaller_args(onefile: bool, console: bool) -> list[str]:
     base_prefix = Path(sys.base_prefix).resolve()
     tk_binaries, tk_datas = _ensure_tk_assets_present(base_prefix)
@@ -124,6 +173,8 @@ def _build_pyinstaller_args(onefile: bool, console: bool) -> list[str]:
         "trimesh",
         "--collect-submodules",
         "trimesh",
+        "--hidden-import",
+        "rarfile",
         "--exclude-module",
         "matplotlib",
         "--add-data",
@@ -141,6 +192,16 @@ def _build_pyinstaller_args(onefile: bool, console: bool) -> list[str]:
         args.extend(["--add-binary", f"{src}{SEP}{dest}"])
     for src, dest in tk_datas:
         args.extend(["--add-data", f"{src}{SEP}{dest}"])
+
+    extra_dlls = _find_extra_dlls(base_prefix)
+    for src, dest in extra_dlls:
+        args.extend(["--add-binary", f"{src}{SEP}{dest}"])
+
+    sevenz = _find_7z_tool()
+    for src, dest in sevenz:
+        args.extend(["--add-binary", f"{src}{SEP}{dest}"])
+    if not sevenz:
+        print("WARNING: 7-Zip not found. RAR extraction will require 7-Zip or UnRAR on the target machine.")
 
     args.append("main.py")
     return args
@@ -170,6 +231,14 @@ def main() -> int:
 
     command = _build_pyinstaller_args(onefile=args.onefile, console=args.console)
     _print_summary(command)
+
+    # Write compile date so the app can check for updates
+    compile_date_file = THIS_DIR / "_compile_date.py"
+    compile_date_file.write_text(
+        f'COMPILE_DATE = "{datetime.now(timezone.utc).strftime("%Y-%m-%d")}"\n',
+        encoding="utf-8",
+    )
+
     subprocess.check_call(command, cwd=THIS_DIR)
 
     if args.onefile:

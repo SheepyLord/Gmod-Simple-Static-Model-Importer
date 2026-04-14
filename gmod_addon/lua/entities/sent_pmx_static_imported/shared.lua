@@ -11,6 +11,10 @@ function ENT:SetupDataTables()
     self:NetworkVar("String", 0, "PMXModelID")
     self:NetworkVar("Float", 0, "PMXScale")
     self:NetworkVar("Vector", 0, "PMXColor")
+    self:NetworkVar("Entity", 0, "PMXBindTarget")
+    self:NetworkVar("Int", 0, "PMXBindBone")
+    self:NetworkVar("Vector", 1, "PMXBindPos")
+    self:NetworkVar("Angle", 0, "PMXBindAng")
 
     if SERVER then
         self:SetPMXModelID(self:GetPMXModelID() or "")

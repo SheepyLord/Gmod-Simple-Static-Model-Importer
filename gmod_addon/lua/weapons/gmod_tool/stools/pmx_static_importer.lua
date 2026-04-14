@@ -3,12 +3,20 @@ if SERVER then
     AddCSLuaFile("pmx_static_importer/sh_core.lua")
     AddCSLuaFile("pmx_static_importer/cl_runtime.lua")
     AddCSLuaFile("pmx_static_importer/cl_material_editor.lua")
+    AddCSLuaFile("pmx_static_importer/cl_bone_picker.lua")
+    AddCSLuaFile("pmx_static_importer/cl_mesh_editor.lua")
+    util.AddNetworkString("pmx_bone_bind")
+    util.AddNetworkString("pmx_bone_pick")
+    util.AddNetworkString("pmx_bone_edit")
+    util.AddNetworkString("pmx_bone_edit_pick")
 end
 
 include("pmx_static_importer/sh_core.lua")
 if CLIENT then
     include("pmx_static_importer/cl_runtime.lua")
     include("pmx_static_importer/cl_material_editor.lua")
+    include("pmx_static_importer/cl_bone_picker.lua")
+    include("pmx_static_importer/cl_mesh_editor.lua")
     PMXStaticImporter.RegisterLanguagePhrases()
 end
 
@@ -136,22 +144,178 @@ function TOOL:LeftClick(trace)
     return true
 end
 
+if SERVER then
+    net.Receive("pmx_bone_bind", function(len, ply)
+        if not IsValid(ply) then return end
+
+        local targetEnt = net.ReadEntity()
+        local boneIndex = net.ReadUInt(10)
+        local offsetPos = net.ReadVector()
+        local offsetAng = net.ReadAngle()
+        local modelID = net.ReadString()
+        local scale = net.ReadFloat()
+        local cr = net.ReadUInt(8)
+        local cg = net.ReadUInt(8)
+        local cb = net.ReadUInt(8)
+        local enableCollision = net.ReadBool()
+
+        if not IsValid(targetEnt) then return end
+
+        modelID = PMXStaticImporter.NormalizeModelID(modelID)
+        if not modelID then
+            ply:ChatPrint(PMXStaticImporter.ToolPrefix(ply) .. " " .. PMXStaticImporter.T("chat_no_imported_model_selected", ply))
+            return
+        end
+
+        local manifest, err = PMXStaticImporter.LoadManifest(modelID, ply)
+        if not manifest then
+            ply:ChatPrint(PMXStaticImporter.ToolPrefix(ply) .. " " .. tostring(err or PMXStaticImporter.T("error_manifest_could_not_be_loaded", ply)))
+            return
+        end
+
+        local boneCount = targetEnt:GetBoneCount() or 0
+        if boneIndex < 0 or boneIndex >= boneCount then
+            return
+        end
+
+        local ent = ents.Create("sent_pmx_static_imported")
+        if not IsValid(ent) then
+            ply:ChatPrint(PMXStaticImporter.ToolPrefix(ply) .. " " .. PMXStaticImporter.T("chat_failed_create_entity", ply))
+            return
+        end
+
+        -- Initial position from bone
+        local matrix = targetEnt:GetBoneMatrix(boneIndex)
+        local bonePos = matrix and matrix:GetTranslation() or targetEnt:GetPos()
+        local boneAng = matrix and matrix:GetAngles() or targetEnt:GetAngles()
+        local finalPos, finalAng = LocalToWorld(offsetPos, offsetAng, bonePos, boneAng)
+
+        ent:SetPos(finalPos)
+        ent:SetAngles(finalAng)
+        ent:Spawn()
+        ent:Activate()
+
+        scale = math.max(tonumber(scale) or 1, 0.0001)
+        local ok, applyErr = ent:ApplyImportedModel(modelID, scale, ply)
+        if not ok then
+            ent:Remove()
+            ply:ChatPrint(PMXStaticImporter.ToolPrefix(ply) .. " " .. tostring(applyErr or PMXStaticImporter.T("error_failed_to_apply_imported_model", ply)))
+            return
+        end
+
+        -- Set bone binding
+        ent:SetPMXBindTarget(targetEnt)
+        ent:SetPMXBindBone(boneIndex)
+        ent:SetPMXBindPos(offsetPos)
+        ent:SetPMXBindAng(offsetAng)
+
+        -- Set color
+        ent:SetPMXColor(Vector(cr / 255, cg / 255, cb / 255))
+
+        -- Disable physics for bone-bound entity unless collision enabled
+        if not enableCollision then
+            ent:SetMoveType(MOVETYPE_NONE)
+            ent:SetSolid(SOLID_NONE)
+            ent:SetCollisionGroup(COLLISION_GROUP_IN_VEHICLE)
+            ent:PhysicsDestroy()
+            ent:SetNotSolid(true)
+        end
+
+        undo.Create(PMXStaticImporter.T("entity_name", ply))
+            undo.AddEntity(ent)
+            undo.SetPlayer(ply)
+        undo.Finish()
+
+        cleanup.Add(ply, "props", ent)
+
+        local boneName = targetEnt:GetBoneName(boneIndex) or tostring(boneIndex)
+        ply:ChatPrint(PMXStaticImporter.ToolPrefix(ply) .. " " .. PMXStaticImporter.TF("chat_bone_bound", ply, boneName))
+    end)
+
+    net.Receive("pmx_bone_edit", function(len, ply)
+        if not IsValid(ply) then return end
+
+        local boundEnt = net.ReadEntity()
+        local offsetPos = net.ReadVector()
+        local offsetAng = net.ReadAngle()
+        local scale = net.ReadFloat()
+
+        if not IsValid(boundEnt) then return end
+        if boundEnt:GetClass() ~= "sent_pmx_static_imported" then return end
+
+        boundEnt:SetPMXBindPos(offsetPos)
+        boundEnt:SetPMXBindAng(offsetAng)
+
+        scale = math.max(tonumber(scale) or 1, 0.0001)
+        boundEnt:SetPMXScale(scale)
+        boundEnt:RebuildPhysics()
+    end)
+end
+
+if CLIENT then
+    net.Receive("pmx_bone_pick", function()
+        local ent = net.ReadEntity()
+        if not IsValid(ent) then return end
+        PMXStaticImporter.OpenBonePicker(ent)
+    end)
+
+    net.Receive("pmx_bone_edit_pick", function()
+        local ent = net.ReadEntity()
+        local count = net.ReadUInt(8)
+        local boundEnts = {}
+        for i = 1, count do
+            boundEnts[i] = net.ReadEntity()
+        end
+        if not IsValid(ent) then return end
+        PMXStaticImporter.OpenBoneEditor(ent, boundEnts)
+    end)
+end
+
 function TOOL:RightClick(trace)
     local ent = trace.Entity
-    if CLIENT then
-        return is_imported_entity(ent)
+    if not IsValid(ent) then return false end
+    if CLIENT then return true end
+
+    -- R + RightClick: remove all bone-bound models from this entity
+    if self:GetOwner():KeyDown(IN_RELOAD) then
+        local removed = 0
+        for _, child in ipairs(ents.FindByClass("sent_pmx_static_imported")) do
+            if IsValid(child) and child.GetPMXBindTarget and child:GetPMXBindTarget() == ent then
+                child:Remove()
+                removed = removed + 1
+            end
+        end
+        self:GetOwner():ChatPrint(tool_msg(self:GetOwner(), "chat_bone_unbound_all", removed))
+        return true
     end
 
-    if not is_imported_entity(ent) then
-        return false
+    -- Shift + RightClick: edit existing bone-bound models on this entity
+    if self:GetOwner():KeyDown(IN_SPEED) then
+        local boundEnts = {}
+        for _, child in ipairs(ents.FindByClass("sent_pmx_static_imported")) do
+            if IsValid(child) and child.GetPMXBindTarget and child:GetPMXBindTarget() == ent then
+                boundEnts[#boundEnts + 1] = child
+            end
+        end
+        if #boundEnts == 0 then return false end
+
+        net.Start("pmx_bone_edit_pick")
+            net.WriteEntity(ent)
+            net.WriteUInt(#boundEnts, 8)
+            for _, child in ipairs(boundEnts) do
+                net.WriteEntity(child)
+            end
+        net.Send(self:GetOwner())
+        return true
     end
 
-    local modelID = ent:GetPMXModelID() or ""
-    local scale = tostring(ent:GetPMXScale() or 1)
+    local boneCount = ent:GetBoneCount() or 0
+    if boneCount <= 0 then return false end
 
-    self:GetOwner():ConCommand(string.format("pmx_static_importer_modelid \"%s\"", modelID))
-    self:GetOwner():ConCommand(string.format("pmx_static_importer_scale \"%s\"", scale))
-    self:GetOwner():ChatPrint(tool_msg(self:GetOwner(), "chat_copied_model_id_and_scale"))
+    net.Start("pmx_bone_pick")
+        net.WriteEntity(ent)
+    net.Send(self:GetOwner())
+
     return true
 end
 
@@ -188,6 +352,11 @@ function TOOL.BuildCPanel(panel)
 
     local refreshButton = panel:Button(L("button_refresh_imported_model_list"))
     refreshButton.DoClick = function()
+        RunConsoleCommand("pmx_static_importer_refresh")
+    end
+
+    local refreshMeshesButton = panel:Button(L("button_refresh_meshes"))
+    refreshMeshesButton.DoClick = function()
         RunConsoleCommand("pmx_static_importer_clear_cache")
         RunConsoleCommand("pmx_static_importer_refresh")
     end
@@ -195,6 +364,11 @@ function TOOL.BuildCPanel(panel)
     local clearCacheButton = panel:Button(L("button_clear_client_cache"))
     clearCacheButton.DoClick = function()
         RunConsoleCommand("pmx_static_importer_clear_cache")
+    end
+
+    local removeAllButton = panel:Button(L("button_remove_all_spawned"))
+    removeAllButton.DoClick = function()
+        RunConsoleCommand("pmx_static_importer_remove_all")
     end
 
     local modelList = vgui.Create("DListView")
@@ -220,7 +394,7 @@ function TOOL.BuildCPanel(panel)
 
     panel:AddItem(modelList)
     panel:TextEntry(L("panel_selected_model_id"), "pmx_static_importer_modelid")
-    panel:NumSlider(L("panel_scale"), "pmx_static_importer_scale", 0.05, 10, 2)
+    panel:NumSlider(L("panel_scale"), "pmx_static_importer_scale", 0.001, 20, 3)
     panel:NumSlider(L("panel_yaw"), "pmx_static_importer_yaw", -180, 180, 0)
 
     -- Physics properties
@@ -296,6 +470,12 @@ function TOOL.BuildCPanel(panel)
     editMaterialsButton.DoClick = function()
         local mid = GetConVar("pmx_static_importer_modelid"):GetString()
         PMXStaticImporter.OpenMaterialEditor(mid)
+    end
+
+    local editMeshButton = panel:Button(L("button_edit_mesh"))
+    editMeshButton.DoClick = function()
+        local mid = GetConVar("pmx_static_importer_modelid"):GetString()
+        PMXStaticImporter.OpenMeshEditor(mid)
     end
 
     local hookID = "PMXStaticImporterCPanel_" .. tostring(panel)

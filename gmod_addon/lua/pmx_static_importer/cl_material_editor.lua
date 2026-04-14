@@ -235,6 +235,30 @@ function PMXStaticImporter.OpenMaterialEditor(modelID)
         surface.PlaySound("buttons/button14.wav")
     end
 
+    local applyToAllBtn = vgui.Create("DButton", buttonBar)
+    applyToAllBtn:Dock(LEFT)
+    applyToAllBtn:DockMargin(4, 3, 0, 3)
+    applyToAllBtn:SetWide(100)
+    applyToAllBtn:SetText(L("button_apply_to_all"))
+    applyToAllBtn.DoClick = function()
+        local srcOv = allOverrides[tostring(currentSubmeshIndex)] or {}
+        for i = 1, #submeshes do
+            if i ~= currentSubmeshIndex then
+                local k = tostring(i)
+                if not allOverrides[k] then allOverrides[k] = {} end
+                for key, val in pairs(srcOv) do
+                    if key ~= "disabled" then
+                        allOverrides[k][key] = istable(val) and table.Copy(val) or val
+                    end
+                end
+            end
+        end
+        PMXStaticImporter.SaveMaterialOverrides(modelID, allOverrides)
+        PMXStaticImporter.ApplyMaterialOverrides(modelID)
+        buildEditor(currentSubmeshIndex)
+        surface.PlaySound("buttons/button14.wav")
+    end
+
     local resetAllBtn = vgui.Create("DButton", buttonBar)
     resetAllBtn:Dock(LEFT)
     resetAllBtn:DockMargin(4, 3, 0, 3)

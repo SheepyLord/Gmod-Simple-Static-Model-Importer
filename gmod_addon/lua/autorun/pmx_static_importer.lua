@@ -4,6 +4,7 @@ if SERVER then
     AddCSLuaFile("pmx_static_importer/cl_material_editor.lua")
     util.AddNetworkString("pmx_static_importer_request_list")
     util.AddNetworkString("pmx_static_importer_send_list")
+    util.AddNetworkString("pmx_static_importer_remove_all")
 end
 
 include("pmx_static_importer/sh_core.lua")
@@ -32,6 +33,18 @@ end
 if SERVER then
     net.Receive("pmx_static_importer_request_list", function(_, ply)
         send_model_list(ply)
+    end)
+
+    net.Receive("pmx_static_importer_remove_all", function(_, ply)
+        if not IsValid(ply) then return end
+        local count = 0
+        for _, ent in ipairs(ents.FindByClass("sent_pmx_static_imported")) do
+            if IsValid(ent) then
+                ent:Remove()
+                count = count + 1
+            end
+        end
+        ply:ChatPrint(PMXStaticImporter.ToolPrefix(ply) .. " " .. PMXStaticImporter.TF("chat_removed_all_spawned", ply))
     end)
 else
     net.Receive("pmx_static_importer_send_list", function()
@@ -63,5 +76,10 @@ else
         else
             PMXStaticImporter.ClearCache()
         end
+    end)
+
+    concommand.Add("pmx_static_importer_remove_all", function()
+        net.Start("pmx_static_importer_remove_all")
+        net.SendToServer()
     end)
 end

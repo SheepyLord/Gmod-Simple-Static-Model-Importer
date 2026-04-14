@@ -72,3 +72,24 @@ end
 function ENT:PostEntityPaste(ply, ent, createdEntities)
     self:RebuildPhysics()
 end
+
+function ENT:Think()
+    local target = self:GetPMXBindTarget()
+    if not IsValid(target) then return end
+
+    local boneIdx = self:GetPMXBindBone() or 0
+    local matrix = target:GetBoneMatrix(boneIdx)
+    if not matrix then return end
+
+    local bonePos = matrix:GetTranslation()
+    local boneAng = matrix:GetAngles()
+    local offset = self:GetPMXBindPos() or Vector(0, 0, 0)
+    local offsetAng = self:GetPMXBindAng() or Angle(0, 0, 0)
+
+    local finalPos, finalAng = LocalToWorld(offset, offsetAng, bonePos, boneAng)
+    self:SetPos(finalPos)
+    self:SetAngles(finalAng)
+
+    self:NextThink(CurTime())
+    return true
+end

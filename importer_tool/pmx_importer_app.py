@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import os
+import re
+import threading
 import traceback
 import webbrowser
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.request import urlopen, Request
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from _compile_date import COMPILE_DATE
+
 from archive_utils import StagedSource, stage_input
+from cl_material_picker import ask_texture_for_material
 from gmod_locator import find_gmod_installations, normalize_game_root
 from i18n import CODE_BY_LANGUAGE_NAME, LANGUAGE_NAME_BY_CODE, LANGUAGE_OPTIONS, detect_default_language, tr
 from importer_core import (
@@ -40,6 +46,34 @@ _AXIS_LABELS = {
     "-x,-z,y": "Flip X and Z (-X, -Z, Y)",
     "x,y,z": "No axis remap (X, Y, Z)",
 }
+
+_RELEASES_URL = "https://github.com/SheepyLord/Gmod-Simple-Static-Model-Importer/releases/tag/Release"
+_UPDATE_THRESHOLD_DAYS = 3
+
+
+def _check_for_update() -> str:
+    """Return 'update', 'up_to_date', or 'error'.
+
+    Fetches the GitHub releases page and looks for a date string in the page
+    content.  If the most recent release date is more than _UPDATE_THRESHOLD_DAYS
+    after the compile date, returns 'update'.
+    """
+    try:
+        compile_dt = datetime.strptime(COMPILE_DATE, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        req = Request(_RELEASES_URL, headers={"User-Agent": "PMXStaticImporter-UpdateCheck"})
+        with urlopen(req, timeout=8) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+        # GitHub release pages contain <relative-time datetime="2026-04-10T...">
+        dates = re.findall(r'<relative-time[^>]+datetime="(\d{4}-\d{2}-\d{2})T', html)
+        if not dates:
+            return "error"
+        latest_str = max(dates)
+        latest_dt = datetime.strptime(latest_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        if latest_dt >= compile_dt + timedelta(days=_UPDATE_THRESHOLD_DAYS):
+            return "update"
+        return "up_to_date"
+    except Exception:
+        return "error"
 
 
 @dataclass(slots=True)
@@ -76,6 +110,7 @@ class PMXImporterApp:
         self.axis_var = tk.StringVar(value="x,-z,y")
         self.scale_var = tk.StringVar(value="3.6")
         self.flip_v_var = tk.BooleanVar(value=False)
+        self.ignore_missing_tex_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value=self.t("status_ready"))
         self.display_name_status_var = tk.StringVar(value="")
         self.preview_info_var = tk.StringVar(value="")
@@ -88,9 +123,19 @@ class PMXImporterApp:
         self._setup_window_drop_target()
         self._autodetect_gmod()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._start_update_check()
 
     def t(self, key: str, **kwargs) -> str:
         return tr(self._language_code, key, **kwargs)
+
+    def _set_status(self, text: str, *, fg: str = "") -> None:
+        self._status_fg_override = fg
+        self.status_var.set(text)
+
+    def _on_status_var_changed(self, *_args) -> None:
+        fg = getattr(self, "_status_fg_override", "")
+        self.status_label.configure(fg=fg)
+        self._status_fg_override = ""
 
     def _build_ui(self) -> None:
         self.root.geometry("1200x820")
@@ -201,10 +246,16 @@ class PMXImporterApp:
         self.scale_help_label.grid(row=5, column=2, sticky="w", pady=(10, 0))
 
         self.flip_v_check = ttk.Checkbutton(self.settings_frame, variable=self.flip_v_var)
-        self.flip_v_check.grid(row=6, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        self.flip_v_check.grid(row=6, column=0, sticky="w", pady=(10, 0))
+        self.flip_v_hint_label = tk.Label(self.settings_frame, fg="red", font=("", 9))
+        self.flip_v_hint_label.grid(row=6, column=1, columnspan=2, sticky="w", padx=(4, 0), pady=(10, 0))
+        self.flip_v_var.trace_add("write", self._on_flip_v_changed)
+
+        self.ignore_missing_tex_check = ttk.Checkbutton(self.settings_frame, variable=self.ignore_missing_tex_var)
+        self.ignore_missing_tex_check.grid(row=7, column=0, columnspan=3, sticky="w", pady=(10, 0))
 
         action_row = ttk.Frame(self.settings_frame)
-        action_row.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(14, 0))
+        action_row.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(14, 0))
         self.open_workshop_button = ttk.Button(action_row, command=self._open_workshop_page)
         self.open_workshop_button.grid(row=0, column=0, padx=(0, 6))
         self.import_button = ttk.Button(action_row, command=self._import_selected_model)
@@ -318,13 +369,34 @@ class PMXImporterApp:
         log_scroll.grid(row=0, column=1, sticky="ns")
         self.log_text.configure(yscrollcommand=log_scroll.set)
 
-        status = ttk.Label(self.root, textvariable=self.status_var, padding=(10, 0, 10, 10))
-        status.grid(row=3, column=0, sticky="ew")
+        # Update notification (hidden by default)
+        self.update_label = tk.Label(
+            self.root,
+            text="",
+            fg="#1a6dd4",
+            cursor="hand2",
+            font=("Segoe UI", 9, "underline"),
+            anchor="w",
+            padx=10,
+        )
+        self.update_label.grid(row=3, column=0, sticky="ew")
+        self.update_label.grid_remove()
+        self.update_label.bind("<Button-1>", lambda _e: webbrowser.open(_RELEASES_URL))
+
+        self.status_label = tk.Label(
+            self.root,
+            textvariable=self.status_var,
+            anchor="w",
+            padx=10,
+            pady=5,
+        )
+        self.status_label.grid(row=4, column=0, sticky="ew")
 
     def _setup_variable_traces(self) -> None:
         self.display_name_var.trace_add("write", self._on_display_name_var_changed)
         self.scale_var.trace_add("write", self._on_preview_setting_var_changed)
         self.axis_var.trace_add("write", self._on_preview_setting_var_changed)
+        self.status_var.trace_add("write", self._on_status_var_changed)
 
     def _apply_language(self) -> None:
         self.root.title(self.t("app_window_title"))
@@ -347,6 +419,8 @@ class PMXImporterApp:
         self.scale_label.configure(text=self.t("scale"))
         self.scale_help_label.configure(text=self.t("scale_help"))
         self.flip_v_check.configure(text=self.t("flip_v"))
+        self._on_flip_v_changed()
+        self.ignore_missing_tex_check.configure(text=self.t("ignore_missing_tex"))
         self.open_workshop_button.configure(text=self.t("open_workshop"))
         self.import_button.configure(text=self.t("import_selected"))
         self.pmx_list_title_label.configure(text=self.t("pmx_list_title"))
@@ -372,6 +446,16 @@ class PMXImporterApp:
         self.installed_refresh_button.configure(text=self.t("installed_refresh"))
         self.installed_remove_button.configure(text=self.t("installed_remove"))
         self.installed_export_button.configure(text=self.t("installed_export_gma"))
+
+        # Update the update-available label text if it's visible
+        if self.update_label.winfo_ismapped():
+            state = getattr(self, "_update_check_state", None)
+            if state == "update":
+                self.update_label.configure(text=self.t("update_available"))
+            elif state == "up_to_date":
+                self.update_label.configure(text=self.t("update_up_to_date"))
+            elif state == "error":
+                self.update_label.configure(text=self.t("update_check_failed"))
 
         if not self.status_var.get().strip():
             self.status_var.set(self.t("status_ready"))
@@ -465,6 +549,19 @@ class PMXImporterApp:
         self.preview_widget.clear(self.t("preview_empty"))
         self.preview_warning_var.set("")
 
+        # Check source size and prompt if > 10 MB
+        src = Path(path).expanduser().resolve()
+        size_mb = self._get_source_size_mb(src)
+        if size_mb > 10:
+            if not messagebox.askyesno(
+                self.t("large_source_title"),
+                self.t("large_source_confirm", size_mb=size_mb),
+            ):
+                return
+
+        self._set_status(self.t("status_working_open_source"), fg="#1a6dd4")
+        self.root.update_idletasks()
+
         try:
             staged = stage_input(path, log=self.log)
             self.staged_source = staged
@@ -545,9 +642,19 @@ class PMXImporterApp:
         self._set_display_name_programmatically(summary.display_name_suggestion)
         self._update_generated_model_id()
         self.scale_var.set(str(default_scale_for_path(summary.path)))
+        suffix = summary.path.suffix.lower()
+        is_pmx = suffix == ".pmx"
+        self.flip_v_var.set(not is_pmx)
+        self.ignore_missing_tex_var.set(suffix in (".glb", ".gltf"))
         self._update_details(summary)
         self._update_preview(summary)
         self.log(self.t("auto_selected_pmx", name=summary.path.name))
+
+    def _on_flip_v_changed(self, *_args) -> None:
+        if self.flip_v_var.get():
+            self.flip_v_hint_label.configure(text=self.t("flip_v_hint"))
+        else:
+            self.flip_v_hint_label.configure(text="")
 
     def _update_details(self, summary: ModelSummary | None) -> None:
         if summary is None:
@@ -727,6 +834,29 @@ class PMXImporterApp:
             flip_v=bool(self.flip_v_var.get()),
             output_model_id=output_id,
             display_name_override=display_name,
+            resolve_missing_texture=None if self.ignore_missing_tex_var.get() else self._resolve_missing_texture,
+            workspace_root=self.staged_source.workspace_path if self.staged_source else None,
+        )
+
+    def _resolve_missing_texture(
+        self, material: 'PMXMaterial', material_index: int, model: 'PMXModel', model_dir: Path,
+        used_texture_paths: set[Path] | None = None,
+        sub_indices: list[int] | None = None,
+        flip_v: bool = False,
+    ) -> Path | None:
+        from pmx_parser import PMXMaterial as _PMXMat, PMXModel as _PMXMod
+        boundary = self.staged_source.workspace_path if self.staged_source else None
+        return ask_texture_for_material(
+            parent=self.root,
+            material=material,
+            material_index=material_index,
+            model=model,
+            model_dir=model_dir,
+            t=self.t,
+            used_texture_paths=used_texture_paths,
+            sub_indices=sub_indices,
+            boundary=boundary,
+            flip_v=flip_v,
         )
 
     def _open_workshop_page(self) -> None:
@@ -759,6 +889,16 @@ class PMXImporterApp:
             warning_message += "\n\n" + self.t("warning_continue")
             if not messagebox.askyesno(self.t("warning_static_title"), warning_message):
                 return
+
+        if summary.vertex_count > 50_000:
+            if not messagebox.askyesno(
+                self.t("vertex_game_warning_title"),
+                self.t("vertex_game_warning_message", count=summary.vertex_count),
+            ):
+                return
+
+        self._set_status(self.t("status_working_import"), fg="#1a6dd4")
+        self.root.update_idletasks()
 
         try:
             result = import_pmx_model(summary.path, gmod_root, options=options, log=self.log)
@@ -917,6 +1057,58 @@ class PMXImporterApp:
         if self.staged_source is not None:
             self.staged_source.cleanup()
             self.staged_source = None
+
+    @staticmethod
+    def _get_source_size_mb(src: Path) -> float:
+        if src.is_file():
+            return src.stat().st_size / (1024 * 1024)
+        if src.is_dir():
+            total = sum(f.stat().st_size for f in src.rglob("*") if f.is_file())
+            return total / (1024 * 1024)
+        return 0
+
+    def _start_update_check(self) -> None:
+        def _worker():
+            result = _check_for_update()
+            if result == "update":
+                self.root.after(0, self._on_update_available)
+            elif result == "up_to_date":
+                self.root.after(0, self._on_update_up_to_date)
+            else:
+                self.root.after(0, self._on_update_check_failed)
+
+        thread = threading.Thread(target=_worker, daemon=True)
+        thread.start()
+
+    def _on_update_available(self) -> None:
+        self._update_check_state = "update"
+        self.update_label.configure(
+            text=self.t("update_available"),
+            fg="#1a6dd4",
+            cursor="hand2",
+            font=("Segoe UI", 9, "underline"),
+        )
+        self.update_label.grid()
+
+    def _on_update_up_to_date(self) -> None:
+        self._update_check_state = "up_to_date"
+        self.update_label.configure(
+            text=self.t("update_up_to_date"),
+            fg="#2e7d32",
+            cursor="",
+            font=("Segoe UI", 9),
+        )
+        self.update_label.grid()
+
+    def _on_update_check_failed(self) -> None:
+        self._update_check_state = "error"
+        self.update_label.configure(
+            text=self.t("update_check_failed"),
+            fg="#888888",
+            cursor="",
+            font=("Segoe UI", 9),
+        )
+        self.update_label.grid()
 
     def _on_close(self) -> None:
         self._cleanup_staged_source()

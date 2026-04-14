@@ -30,6 +30,23 @@ function ENT:Think()
         self:UpdateClientRenderBounds()
         self:MarkShadowAsDirty()
     end
+
+    -- Follow bone binding
+    local target = self:GetPMXBindTarget()
+    if IsValid(target) then
+        target:SetupBones(BONE_USED_BY_ANYTHING, CurTime())
+        local boneIdx = self:GetPMXBindBone() or 0
+        local matrix = target:GetBoneMatrix(boneIdx)
+        if matrix then
+            local bonePos = matrix:GetTranslation()
+            local boneAng = matrix:GetAngles()
+            local offset = self:GetPMXBindPos() or Vector(0, 0, 0)
+            local offsetAng = self:GetPMXBindAng() or Angle(0, 0, 0)
+            local finalPos, finalAng = LocalToWorld(offset, offsetAng, bonePos, boneAng)
+            self:SetPos(finalPos)
+            self:SetAngles(finalAng)
+        end
+    end
 end
 
 function ENT:Draw()

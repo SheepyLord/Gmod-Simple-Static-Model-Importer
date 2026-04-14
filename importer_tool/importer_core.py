@@ -21,16 +21,19 @@ from gmod_locator import GModInstall, normalize_game_root
 from pmx_parser import PMXMaterial, PMXModel
 from scene_loader import load_supported_model, scan_supported_model_files
 
+LogFn = Callable[[str], object] | None
+ResolveMissingTextureFn = Callable[[PMXMaterial, int, PMXModel, Path, set[Path], list[int], bool], Path | None] | None
+
 
 MESH_MAGIC = b"PMXSM01\0"
 
 DEFAULT_SCALE_BY_EXT: dict[str, float] = {
     ".pmx": 3.6,
-    ".fbx": 32.0,
-    ".obj": 32.0,
-    ".glb": 32.0,
+    ".fbx": 10.0,
+    ".obj": 10.0,
+    ".glb": 10.0,
 }
-DEFAULT_SCALE_FALLBACK: float = 32.0
+DEFAULT_SCALE_FALLBACK: float = 10.0
 
 
 def default_scale_for_path(path: Path | str) -> float:
@@ -46,6 +49,8 @@ class ImportOptions:
     flip_v: bool = False
     output_model_id: str | None = None
     display_name_override: str | None = None
+    resolve_missing_texture: ResolveMissingTextureFn = None
+    workspace_root: Path | None = None
 
 
 @dataclass(slots=True)
@@ -136,7 +141,10 @@ def import_pmx_model(
     data_dir.mkdir(parents=True, exist_ok=True)
     materials_dir.mkdir(parents=True, exist_ok=True)
 
-    texture_lookup = build_texture_lookup(model.source_path.parent if model.source_path else Path.cwd())
+    texture_lookup = build_texture_lookup(
+        model.source_path.parent if model.source_path else Path.cwd(),
+        boundary=options.workspace_root,
+    )
     bake_flip_winding = axis_flips_winding(options.axis_preset)
 
     bounds_mins = [float("inf"), float("inf"), float("inf")]
@@ -165,6 +173,9 @@ def import_pmx_model(
             model_id=model_id,
             texture_output_cache=texture_output_cache,
             log=log,
+            resolve_missing_texture=options.resolve_missing_texture,
+            sub_indices=raw_sub_indices,
+            flip_v=options.flip_v,
         )
 
         safe_material_name = build_material_id(material, material_index)
@@ -653,16 +664,43 @@ def finalize_bounds_max(maxs: list[float]) -> tuple[float, float, float]:
 
 
 
-def build_texture_lookup(root: Path) -> dict[str, Path]:
+def build_texture_lookup(root: Path, boundary: Path | None = None) -> dict[str, Path]:
     lookup: dict[str, Path] = {}
-    if not root.exists():
-        return lookup
-    for file_path in root.rglob("*"):
-        if not file_path.is_file():
+    search_roots = [root]
+    if boundary is None:
+        parent = root.parent
+        if parent.exists() and parent != root:
+            search_roots.append(parent)
+    else:
+        # Walk up but stay within the boundary
+        current = root.parent
+        boundary_resolved = boundary.resolve()
+        while current != root and current.exists():
+            try:
+                current.resolve().relative_to(boundary_resolved)
+            except ValueError:
+                break
+            if current not in search_roots:
+                search_roots.append(current)
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
+    for search_root in search_roots:
+        if not search_root.exists():
             continue
-        relative = file_path.relative_to(root).as_posix().lower()
-        lookup[relative] = file_path
-        lookup[file_path.name.lower()] = file_path
+        for file_path in search_root.rglob("*"):
+            if not file_path.is_file():
+                continue
+            try:
+                relative = file_path.relative_to(search_root).as_posix().lower()
+                if relative not in lookup:
+                    lookup[relative] = file_path
+            except ValueError:
+                pass
+            name_lower = file_path.name.lower()
+            if name_lower not in lookup:
+                lookup[name_lower] = file_path
     return lookup
 
 
@@ -694,6 +732,16 @@ def resolve_texture_path(model_dir: Path, texture_lookup: dict[str, Path], raw_p
             if re.sub(r"[^a-z0-9]+", "", Path(key).name.lower()) == normalized_basename:
                 return value
 
+    # Strip trailing extension-like suffixes from the name (e.g. _dds, _png)
+    stem = Path(candidate_key).stem.lower()
+    for ext_suffix in ('_dds', '_png', '_jpg', '_jpeg', '_bmp', '_tga'):
+        if stem.endswith(ext_suffix):
+            clean_stem = stem[:len(stem) - len(ext_suffix)]
+            for key, value in texture_lookup.items():
+                if Path(key).stem.lower() == clean_stem:
+                    return value
+            break
+
     return None
 
 
@@ -709,6 +757,9 @@ def export_material_texture(
     model_id: str,
     texture_output_cache: dict[str, tuple[str, str]],
     log: LogFn,
+    resolve_missing_texture: ResolveMissingTextureFn = None,
+    sub_indices: list[int] | None = None,
+    flip_v: bool = False,
 ) -> tuple[str, str]:
     safe_material_name = build_material_id(material, material_index)
 
@@ -722,6 +773,13 @@ def export_material_texture(
             embedded_texture_bytes = model.embedded_textures[raw_texture_ref]
         else:
             texture_path = resolve_texture_path(model_dir, texture_lookup, raw_texture_ref)
+            if texture_path is None:
+                # Try matching the material name as a texture reference
+                for fallback_name in (material.name_en, material.name_local):
+                    if fallback_name:
+                        texture_path = resolve_texture_path(model_dir, texture_lookup, fallback_name)
+                        if texture_path is not None:
+                            break
             if texture_path is None and log:
                 log(f"Texture missing for material {material_index}: {raw_texture_ref!r}. Using diffuse-color fallback PNG.")
 
@@ -742,6 +800,26 @@ def export_material_texture(
         image_rel = f"pmx_static_importer/{model_id}/{image_rel_path.name}"
         texture_output_cache[cache_key] = (image_rel, str(texture_path.name))
         return texture_output_cache[cache_key]
+
+    # Ask the user to pick a texture before falling back to diffuse color
+    if resolve_missing_texture is not None:
+        # Collect paths already assigned to other materials
+        used_paths: set[Path] = set()
+        for cache_key in texture_output_cache:
+            if cache_key.startswith("file::"):
+                try:
+                    used_paths.add(Path(cache_key[6:]))
+                except Exception:
+                    pass
+        user_picked = resolve_missing_texture(material, material_index, model, model_dir, used_paths, sub_indices or [], flip_v)
+        if user_picked is not None:
+            cache_key = f"file::{user_picked.resolve()}"
+            if cache_key in texture_output_cache:
+                return texture_output_cache[cache_key]
+            image_rel_path = convert_source_image_to_png(user_picked, materials_dir, safe_material_name)
+            image_rel = f"pmx_static_importer/{model_id}/{image_rel_path.name}"
+            texture_output_cache[cache_key] = (image_rel, str(user_picked.name))
+            return texture_output_cache[cache_key]
 
     fallback_rgba = tuple(max(0, min(255, int(round(component * 255.0)))) for component in material.diffuse)
     cache_key = f"rgba::{fallback_rgba}"
@@ -774,8 +852,21 @@ def convert_image_bytes_to_png(source_bytes: bytes, materials_dir: Path, safe_ma
 
     with Image.open(io.BytesIO(source_bytes)) as img:
         converted = img.convert("RGBA")
+        converted = _clamp_image_size(converted, 4096)
         converted.save(out_path, format="PNG")
     return out_path
+
+
+
+def _clamp_image_size(image: Image.Image, max_side: int) -> Image.Image:
+    """Resize the image so neither side exceeds *max_side* pixels."""
+    w, h = image.size
+    if w <= max_side and h <= max_side:
+        return image
+    scale = min(max_side / w, max_side / h)
+    new_w = max(1, int(w * scale))
+    new_h = max(1, int(h * scale))
+    return image.resize((new_w, new_h), Image.LANCZOS)
 
 
 
