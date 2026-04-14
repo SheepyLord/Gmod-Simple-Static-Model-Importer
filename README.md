@@ -2,7 +2,7 @@
 
 Subscribe to the runtime importor addon on the Steam Workshop:
 
-**[PMX Static Importer Runtime](https://steamcommunity.com/workshop/filedetails/?id=3467707027)**
+**[PMX Static Importer Runtime](https://steamcommunity.com/sharedfiles/filedetails/?id=3706539692)**
 
 The addon appears in-game under **Construction → Model Importer → Static Model Importer** in the toolgun menu.
 
