@@ -48,26 +48,45 @@ _AXIS_LABELS = {
 }
 
 _RELEASES_URL = "https://github.com/SheepyLord/Gmod-Simple-Static-Model-Importer/releases/tag/Release"
+_RELEASES_API_URL = "https://api.github.com/repos/SheepyLord/Gmod-Simple-Static-Model-Importer/releases/tags/Release"
 _UPDATE_THRESHOLD_DAYS = 3
 
 
 def _check_for_update() -> str:
     """Return 'update', 'up_to_date', or 'error'.
 
-    Fetches the GitHub releases page and looks for a date string in the page
-    content.  If the most recent release date is more than _UPDATE_THRESHOLD_DAYS
-    after the compile date, returns 'update'.
+    Uses the GitHub API to get the release's ``updated_at`` timestamp, which
+    reflects the most recent asset upload.  If that date is more than
+    _UPDATE_THRESHOLD_DAYS after the compile date, returns 'update'.
     """
     try:
+        import json as _json
+
         compile_dt = datetime.strptime(COMPILE_DATE, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        req = Request(_RELEASES_URL, headers={"User-Agent": "PMXStaticImporter-UpdateCheck"})
+        req = Request(
+            _RELEASES_API_URL,
+            headers={
+                "User-Agent": "PMXStaticImporter-UpdateCheck",
+                "Accept": "application/vnd.github+json",
+            },
+        )
         with urlopen(req, timeout=8) as resp:
-            html = resp.read().decode("utf-8", errors="replace")
-        # GitHub release pages contain <relative-time datetime="2026-04-10T...">
-        dates = re.findall(r'<relative-time[^>]+datetime="(\d{4}-\d{2}-\d{2})T', html)
-        if not dates:
+            data = _json.loads(resp.read().decode("utf-8", errors="replace"))
+
+        # Prefer the most recent asset upload date, fall back to release updated_at
+        candidate_dates: list[str] = []
+        for asset in data.get("assets") or []:
+            ts = asset.get("updated_at") or asset.get("created_at")
+            if ts:
+                candidate_dates.append(ts)
+        if not candidate_dates:
+            ts = data.get("updated_at") or data.get("published_at")
+            if ts:
+                candidate_dates.append(ts)
+        if not candidate_dates:
             return "error"
-        latest_str = max(dates)
+
+        latest_str = max(candidate_dates)[:10]  # "YYYY-MM-DD"
         latest_dt = datetime.strptime(latest_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
         if latest_dt >= compile_dt + timedelta(days=_UPDATE_THRESHOLD_DAYS):
             return "update"
