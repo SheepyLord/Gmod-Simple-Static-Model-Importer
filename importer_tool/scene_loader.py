@@ -16,6 +16,7 @@ import numpy as np
 import trimesh
 from PIL import Image
 
+from gmod_locator import _find_steam_roots, _parse_libraryfolders
 from pmx_parser import PMXMaterial, PMXModel, PMXParser, PMXVertex
 
 
@@ -79,6 +80,20 @@ def load_supported_model(path: str | Path, log: LogFn = None) -> PMXModel:
 
 
 def _load_fbx_model(source_path: Path, log: LogFn = None) -> PMXModel:
+    # Try loading FBX directly via trimesh (works when assimp or another backend is available)
+    try:
+        model = _load_trimesh_scene_model(source_path, source_format='fbx', log=log)
+        model.source_format = 'fbx'
+        if not model.name_en:
+            model.name_en = source_path.stem
+        if not model.name_local:
+            model.name_local = source_path.stem
+        if log:
+            log(f"FBX: loaded '{source_path.name}' directly via trimesh.")
+        return model
+    except Exception:
+        pass
+
     sibling = _find_sibling_scene_variant(source_path)
     if sibling is not None:
         if log:
@@ -94,7 +109,11 @@ def _load_fbx_model(source_path: Path, log: LogFn = None) -> PMXModel:
     blender_path = _find_blender_executable()
     if blender_path is None:
         raise SceneLoadError(
-            "FBX import needs either Blender installed or a sibling .glb/.gltf/.obj file with the same base name."
+            "FBX import requires Blender for conversion. Please try one of:\n"
+            "  1. Install Blender (free) from Steam: https://store.steampowered.com/app/365670/Blender/\n"
+            "     or from https://www.blender.org/download/\n"
+            "  2. Place a .glb, .gltf, or .obj file next to the .fbx with the same base name\n"
+            "  3. Set the BLENDER_PATH environment variable to your blender.exe path"
         )
 
     if log:
@@ -135,11 +154,27 @@ def _find_blender_executable() -> Path | None:
         return Path(which_value).resolve()
 
     if os.name == 'nt':
+        # Standard install location
         blender_root = Path('C:/Program Files/Blender Foundation')
         if blender_root.exists():
             candidates = sorted(blender_root.glob('Blender*/*/blender.exe')) + sorted(blender_root.glob('Blender*/blender.exe'))
             if candidates:
                 return candidates[-1].resolve()
+
+        # Steam library locations
+        _steam_blender_dirs: list[Path] = []
+        for steam_root in _find_steam_roots():
+            _steam_blender_dirs.append(steam_root / 'steamapps' / 'common' / 'Blender')
+            library_file = steam_root / 'steamapps' / 'libraryfolders.vdf'
+            if library_file.is_file():
+                for library_path in _parse_libraryfolders(library_file):
+                    _steam_blender_dirs.append(library_path / 'steamapps' / 'common' / 'Blender')
+        for steam_blender in _steam_blender_dirs:
+            if steam_blender.exists():
+                candidates = sorted(steam_blender.glob('blender.exe')) + sorted(steam_blender.glob('*/blender.exe'))
+                if candidates:
+                    return candidates[-1].resolve()
+
     return None
 
 

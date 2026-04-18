@@ -37,7 +37,7 @@ from importer_core import (
 )
 from pmx_parser import PMXModel, PMXParseError
 from preview_renderer import PMXPreviewWidget, PreviewStats
-from scene_loader import load_supported_model, scan_supported_model_files
+from scene_loader import SceneLoadError, load_supported_model, scan_supported_model_files
 
 
 _AXIS_LABELS = {
@@ -860,7 +860,40 @@ class PMXImporterApp:
         )
 
     def _open_workshop_page(self) -> None:
-        webbrowser.open("https://steamcommunity.com/workshop/filedetails/?id=3467707027")
+        webbrowser.open("https://steamcommunity.com/workshop/filedetails/?id=3706539692")
+
+    def _show_fbx_blender_dialog(self) -> None:
+        """Show a custom dialog for missing Blender with download buttons."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title(self.t("fbx_needs_blender_title"))
+        dlg.resizable(False, False)
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        frame = ttk.Frame(dlg, padding=16)
+        frame.pack(fill="both", expand=True)
+
+        msg_label = ttk.Label(frame, text=self.t("fbx_needs_blender_message"), wraplength=420, justify="left")
+        msg_label.pack(pady=(0, 12))
+
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill="x")
+
+        def _open_blender_download() -> None:
+            webbrowser.open("https://www.blender.org/download/")
+
+        def _open_blender_steam() -> None:
+            webbrowser.open("https://store.steampowered.com/app/365670/Blender/")
+
+        ttk.Button(btn_frame, text=self.t("fbx_needs_blender_download"), command=_open_blender_download).pack(side="left", padx=(0, 6))
+        ttk.Button(btn_frame, text=self.t("fbx_needs_blender_steam"), command=_open_blender_steam).pack(side="left", padx=(0, 6))
+        ttk.Button(btn_frame, text="OK", command=dlg.destroy).pack(side="right")
+
+        dlg.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - dlg.winfo_width()) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - dlg.winfo_height()) // 2
+        dlg.geometry(f"+{x}+{y}")
+        dlg.wait_window()
 
     def _import_selected_model(self) -> None:
         summary = self._get_selected_summary()
@@ -922,7 +955,10 @@ class PMXImporterApp:
             self.status_var.set(self.t("status_import_failed"))
             self.log(self.t("import_failed_log", error=exc))
             self.log(traceback.format_exc())
-            messagebox.showerror(self.t("import_failed_title"), str(exc))
+            if isinstance(exc, SceneLoadError) and "blender" in str(exc).lower():
+                self._show_fbx_blender_dialog()
+            else:
+                messagebox.showerror(self.t("import_failed_title"), str(exc))
 
     def _refresh_imported_models(self, quiet: bool = False, keep_status: bool = False) -> None:
         self.installed_tree.delete(*self.installed_tree.get_children())

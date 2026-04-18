@@ -152,6 +152,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "update_available": "\u2b06 A newer version is available. Click here to download the update.",
         "update_up_to_date": "\u2714 You are using the latest version.",
         "update_check_failed": "Unable to check for updates.",
+        "fbx_needs_blender_title": "FBX Import — Blender Required",
+        "fbx_needs_blender_message": "FBX import requires Blender for conversion.\nBlender is free and can be installed from Steam or the official website.\n\nAlternatively, place a .glb, .gltf, or .obj file next to the .fbx with the same base name.",
+        "fbx_needs_blender_download": "Download Blender",
+        "fbx_needs_blender_steam": "Open in Steam",
     },
     "zh": {
         "app_window_title": "Garry's Mod PMX 静态导入器",
@@ -290,6 +294,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "update_available": "⬆ 有新版本可用。点击此处下载更新。",
         "update_up_to_date": "✔ 您正在使用最新版本。",
         "update_check_failed": "无法检查更新。",
+        "fbx_needs_blender_title": "FBX 导入 — 需要 Blender",
+        "fbx_needs_blender_message": "FBX 导入需要 Blender 进行格式转换。\nBlender 是免费的，可以从 Steam 或官方网站安装。\n\n或者，将与 .fbx 同名的 .glb、.gltf 或 .obj 文件放在同一目录下。",
+        "fbx_needs_blender_download": "下载 Blender",
+        "fbx_needs_blender_steam": "在 Steam 中打开",
     },
     "fr": {
         "app_window_title": "Importateur PMX statique pour Garry's Mod",
@@ -428,6 +436,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "update_available": "\u2b06 Une version plus r\u00e9cente est disponible. Cliquez ici pour t\u00e9l\u00e9charger la mise \u00e0 jour.",
         "update_up_to_date": "\u2714 Vous utilisez la derni\u00e8re version.",
         "update_check_failed": "Impossible de v\u00e9rifier les mises \u00e0 jour.",
+        "fbx_needs_blender_title": "Import FBX — Blender requis",
+        "fbx_needs_blender_message": "L'import FBX nécessite Blender pour la conversion.\nBlender est gratuit et peut être installé depuis Steam ou le site officiel.\n\nVous pouvez aussi placer un fichier .glb, .gltf ou .obj à côté du .fbx avec le même nom de base.",
+        "fbx_needs_blender_download": "Télécharger Blender",
+        "fbx_needs_blender_steam": "Ouvrir dans Steam",
     },
     "ja": {
         "app_window_title": "Garry's Mod 用 PMX 静的インポーター",
@@ -556,6 +568,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "update_available": "⬆ 新しいバージョンが利用可能です。ここをクリックして更新をダウンロードしてください。",
         "update_up_to_date": "✔ 最新バージョンを使用しています。",
         "update_check_failed": "アップデートを確認できませんでした。",
+        "fbx_needs_blender_title": "FBX インポート — Blender が必要です",
+        "fbx_needs_blender_message": "FBX のインポートには変換用に Blender が必要です。\nBlender は無料で、Steam または公式サイトからインストールできます。\n\nまたは、.fbx と同じ名前の .glb、.gltf、.obj ファイルを同じフォルダーに配置してください。",
+        "fbx_needs_blender_download": "Blender をダウンロード",
+        "fbx_needs_blender_steam": "Steam で開く",
     },
     "ko": {
         "app_window_title": "Garry's Mod용 PMX 정적 임포터",
@@ -694,6 +710,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "update_available": "⬆ 새로운 버전이 있습니다. 여기를 클릭하여 업데이트를 다운로드하세요.",
         "update_up_to_date": "✔ 최신 버전을 사용 중입니다.",
         "update_check_failed": "업데이트를 확인할 수 없습니다.",
+        "fbx_needs_blender_title": "FBX 가져오기 — Blender 필요",
+        "fbx_needs_blender_message": "FBX 가져오기에는 변환을 위해 Blender가 필요합니다.\nBlender는 무료이며 Steam 또는 공식 웹사이트에서 설치할 수 있습니다.\n\n또는 .fbx와 같은 이름의 .glb, .gltf, .obj 파일을 같은 폴더에 넣으세요.",
+        "fbx_needs_blender_download": "Blender 다운로드",
+        "fbx_needs_blender_steam": "Steam에서 열기",
     },
     "ru": {
         "app_window_title": "Статический импортёр PMX для Garry's Mod",
@@ -822,6 +842,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "update_available": "⬆ Доступна новая версия. Нажмите здесь, чтобы скачать обновление.",
         "update_up_to_date": "✔ Вы используете последнюю версию.",
         "update_check_failed": "Не удалось проверить обновления.",
+        "fbx_needs_blender_title": "Импорт FBX — требуется Blender",
+        "fbx_needs_blender_message": "Для импорта FBX необходим Blender для конвертации.\nBlender бесплатен и может быть установлен из Steam или с официального сайта.\n\nВы также можете разместить рядом с .fbx файл .glb, .gltf или .obj с тем же именем.",
+        "fbx_needs_blender_download": "Скачать Blender",
+        "fbx_needs_blender_steam": "Открыть в Steam",
     },
 }
 
