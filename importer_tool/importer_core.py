@@ -113,7 +113,7 @@ def import_pmx_model(
 ) -> ImportResult:
     options = options or ImportOptions()
     install = normalize_game_root(gmod_root)
-    model = load_supported_model(pmx_path, log=log)
+    model = load_supported_model(pmx_path, log=log, boundary=options.workspace_root)
 
     if log:
         log(f"Parsed model: {Path(pmx_path).name} ({model.source_format.upper()})")
@@ -672,20 +672,26 @@ def build_texture_lookup(root: Path, boundary: Path | None = None) -> dict[str, 
         if parent.exists() and parent != root:
             search_roots.append(parent)
     else:
-        # Walk up but stay within the boundary
-        current = root.parent
+        # Walk up but stay strictly within the boundary
         boundary_resolved = boundary.resolve()
-        while current != root and current.exists():
-            try:
-                current.resolve().relative_to(boundary_resolved)
-            except ValueError:
-                break
-            if current not in search_roots:
-                search_roots.append(current)
-            parent = current.parent
-            if parent == current:
-                break
-            current = parent
+        try:
+            root.resolve().relative_to(boundary_resolved)
+        except ValueError:
+            # root is outside boundary – fall back to boundary itself
+            search_roots = [boundary_resolved]
+        else:
+            current = root.parent
+            while current != root and current.exists():
+                try:
+                    current.resolve().relative_to(boundary_resolved)
+                except ValueError:
+                    break
+                if current not in search_roots:
+                    search_roots.append(current)
+                parent = current.parent
+                if parent == current:
+                    break
+                current = parent
     for search_root in search_roots:
         if not search_root.exists():
             continue

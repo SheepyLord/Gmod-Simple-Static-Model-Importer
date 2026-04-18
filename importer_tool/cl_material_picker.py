@@ -276,13 +276,21 @@ def ask_texture_for_material(
             try:
                 current.relative_to(boundary_resolved)
             except ValueError:
+                # current is outside boundary – stop walking up
                 break
+        elif len(search_roots) >= 2:
+            # No boundary set; still limit to at most model_dir + one parent
+            break
         if current.exists() and current not in search_roots:
             search_roots.append(current)
         parent_dir = current.parent
         if parent_dir == current:
             break
         current = parent_dir
+    if boundary_resolved is not None and not search_roots:
+        # model_dir was outside boundary – fall back to boundary itself
+        if boundary_resolved.exists():
+            search_roots = [boundary_resolved]
     available = _collect_images_from_roots(*search_roots)
     dialog = MaterialPickerDialog(
         parent=parent,

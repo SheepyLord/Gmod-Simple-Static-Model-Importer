@@ -62,7 +62,7 @@ def scan_supported_model_files(root: Path) -> list[Path]:
 
 
 
-def load_supported_model(path: str | Path, log: LogFn = None) -> PMXModel:
+def load_supported_model(path: str | Path, log: LogFn = None, boundary: Path | None = None) -> PMXModel:
     source_path = Path(path).expanduser().resolve()
     suffix = source_path.suffix.lower()
     if suffix == '.pmx':
@@ -70,19 +70,19 @@ def load_supported_model(path: str | Path, log: LogFn = None) -> PMXModel:
         model.source_format = 'pmx'
         return model
     if suffix == '.obj':
-        return _load_obj_model(source_path, log=log)
+        return _load_obj_model(source_path, log=log, boundary=boundary)
     if suffix in {'.glb', '.gltf'}:
-        return _load_trimesh_scene_model(source_path, source_format=suffix.lstrip('.'), log=log)
+        return _load_trimesh_scene_model(source_path, source_format=suffix.lstrip('.'), log=log, boundary=boundary)
     if suffix == '.fbx':
-        return _load_fbx_model(source_path, log=log)
+        return _load_fbx_model(source_path, log=log, boundary=boundary)
     raise SceneLoadError(f'Unsupported model format: {source_path.suffix}')
 
 
 
-def _load_fbx_model(source_path: Path, log: LogFn = None) -> PMXModel:
+def _load_fbx_model(source_path: Path, log: LogFn = None, boundary: Path | None = None) -> PMXModel:
     # Try loading FBX directly via trimesh (works when assimp or another backend is available)
     try:
-        model = _load_trimesh_scene_model(source_path, source_format='fbx', log=log)
+        model = _load_trimesh_scene_model(source_path, source_format='fbx', log=log, boundary=boundary)
         model.source_format = 'fbx'
         if not model.name_en:
             model.name_en = source_path.stem
@@ -98,7 +98,7 @@ def _load_fbx_model(source_path: Path, log: LogFn = None) -> PMXModel:
     if sibling is not None:
         if log:
             log(f"FBX fallback: using sibling scene file '{sibling.name}' for '{source_path.name}'.")
-        model = load_supported_model(sibling, log=log)
+        model = load_supported_model(sibling, log=log, boundary=boundary)
         model.source_format = 'fbx'
         if not model.name_en:
             model.name_en = source_path.stem
@@ -206,14 +206,14 @@ def _convert_fbx_to_glb_with_blender(source_path: Path, glb_path: Path, blender_
 
 
 
-def _load_obj_model(source_path: Path, log: LogFn = None) -> PMXModel:
+def _load_obj_model(source_path: Path, log: LogFn = None, boundary: Path | None = None) -> PMXModel:
     """Load OBJ with direct face-vertex UV parsing for reliable per-material UVs.
 
     Trimesh may share or misassign UV arrays across sub-geometries when
     splitting an OBJ by material, causing the wrong material's UVs to appear
     in the texture-assignment picker.  Parsing the OBJ directly avoids this.
     """
-    obj_overrides = _parse_obj_material_overrides(source_path)
+    obj_overrides = _parse_obj_material_overrides(source_path, boundary=boundary)
 
     # ── Parse OBJ geometry ──────────────────────────────────────────
     positions: list[tuple[float, float, float]] = []
@@ -308,7 +308,7 @@ def _load_obj_model(source_path: Path, log: LogFn = None) -> PMXModel:
     textures: list[str] = []
     embedded_textures: dict[str, bytes] = {}
     texture_index_by_key: dict[str, int] = {}
-    available_images = _collect_workspace_images(source_path)
+    available_images = _collect_workspace_images(source_path, boundary=boundary)
     used_images: set[Path] = set()
 
     for material_name in material_order:
@@ -418,6 +418,7 @@ def _load_trimesh_scene_model(
     log: LogFn = None,
     obj_material_overrides: dict[str, _ObjMaterialOverride] | None = None,
     obj_usemtl_order: list[str] | None = None,
+    boundary: Path | None = None,
 ) -> PMXModel:
     try:
         scene = trimesh.load(source_path, force='scene', process=False)
@@ -443,7 +444,7 @@ def _load_trimesh_scene_model(
     if log:
         log(f"Loaded {source_path.suffix.lower()} scene with {len(scene.geometry)} geometry object(s).")
 
-    available_images = _collect_workspace_images(source_path)
+    available_images = _collect_workspace_images(source_path, boundary=boundary)
 
     # Build a set for fast name-based usemtl matching
     _usemtl_remaining: set[str] = set(obj_usemtl_order) if obj_usemtl_order else set()
@@ -756,11 +757,20 @@ def _apply_normal_transform(normals: np.ndarray, transform_matrix: np.ndarray) -
 
 
 
-def _collect_workspace_images(source_path: Path) -> list[Path]:
-    """Collect image files from the model directory and nearby directories."""
+def _collect_workspace_images(source_path: Path, boundary: Path | None = None) -> list[Path]:
+    """Collect image files from the model directory and nearby directories.
+
+    When *boundary* is given the search never leaves that directory tree.
+    """
     search_roots: list[Path] = []
     current = source_path.parent.resolve()
+    boundary_resolved = boundary.resolve() if boundary else None
     for _ in range(3):
+        if boundary_resolved is not None:
+            try:
+                current.relative_to(boundary_resolved)
+            except ValueError:
+                break
         if current.exists() and current not in search_roots:
             search_roots.append(current)
         parent = current.parent
@@ -875,7 +885,7 @@ def _extract_obj_usemtl_order(obj_path: Path) -> list[str]:
 
 
 
-def _parse_obj_material_overrides(obj_path: Path) -> dict[str, _ObjMaterialOverride]:
+def _parse_obj_material_overrides(obj_path: Path, boundary: Path | None = None) -> dict[str, _ObjMaterialOverride]:
     mtllib_paths = _discover_mtl_files(obj_path)
     overrides: dict[str, _ObjMaterialOverride] = {}
     all_raw_refs: list[tuple[str, str]] = []
@@ -915,7 +925,7 @@ def _parse_obj_material_overrides(obj_path: Path) -> dict[str, _ObjMaterialOverr
                 except Exception:
                     pass
 
-    available_images = _collect_workspace_images(obj_path)
+    available_images = _collect_workspace_images(obj_path, boundary=boundary)
     _populate_overrides_from_obj_usemtl(obj_path, overrides)
     resolved_refs = _resolve_referenced_images(all_raw_refs, available_images)
     for material_name, resolved_path in resolved_refs.items():

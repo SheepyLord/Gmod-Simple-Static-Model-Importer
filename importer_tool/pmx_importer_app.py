@@ -620,8 +620,9 @@ class PMXImporterApp:
             messagebox.showerror(self.t("open_source_failed_title"), str(exc))
 
     def _build_summary(self, pmx_file: Path) -> ModelSummary:
+        boundary = self.staged_source.workspace_path if self.staged_source else None
         try:
-            model = load_supported_model(pmx_file, log=self.log)
+            model = load_supported_model(pmx_file, log=self.log, boundary=boundary)
         except PMXParseError as exc:
             raise PMXParseError(f"{pmx_file.name}: {exc}") from exc
         except Exception as exc:
